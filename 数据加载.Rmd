@@ -1,0 +1,114 @@
+---
+author: "Chen Yaxian"
+date: "2025-11-03"
+---
+```{r cars}
+SH <- read.csv("D:/git/SoilHealthDatabase/data/SoilHealthDB_V4.csv", fileEncoding = "GBK")
+SH <- SH[!is.na(SH$Longitude) & !is.na(SH$Latitude), ]
+ai <- terra::rast("/Global-AI_ET0_annual_v3/ai_v3_yr.tif")
+et0 <- terra::rast("/Global-AI_ET0_annual_v3/et0_v3_yr.tif")
+AM <- terra::rast("/MycDistrAM_current.tif")
+EcM <- terra::rast("/MycDistrEM_current.tif")
+ErM <- terra::rast("/MycDistrER_current.tif")
+NM <- terra::rast("/MycDistrNM_current.tif")
+maoc_poc <- read.csv("/MAOC_POC/MAOC_POC.csv")
+maoc_poc <- maoc_poc[!is.na(maoc_poc$lon) & !is.na(maoc_poc$lat), ]
+site_points <- vect(SH, geom = c("Longitude", "Latitude"), crs = crs(ai))
+soil_climate <- terra::extract(c(ai, et0), site_points, ExperimentID = TRUE)
+site_coords <- terra::crds(site_points)
+soil_bio <- terra::extract(c(AM, EcM, ErM, NM), site_points, ExperimentID = TRUE)
+colnames(soil_bio) <- c("ExperimentID", "AM", "EcM", "ErM", "NM")
+MBC_list <- list.files(path = "/MBC_resample1_pred_all_vars", pattern = "resample1_all_\\d{4}\\.rds", full.names = TRUE)
+raster_MBC <- lapply(MBC_list, readRDS)
+
+
+variables <- c("elev", "nitrogen", "pred")
+extracted_data <- lapply(variables, function(var) {
+  matrix(NA, nrow = nrow(site_coords), ncol = length(raster_MBC))
+})
+names(extracted_data) <- variables
+
+for (i in seq_along(raster_MBC)) {
+  current_df <- raster_MBC[[i]]
+  current_df <- current_df[!is.na(current_df$x) & !is.na(current_df$y), ]
+  for (j in seq_len(nrow(site_coords))) {
+    lon <- site_coords[j, 1]
+    lat <- site_coords[j, 2]
+    dists <- sqrt((current_df$x - lon)^2 + (current_df$y - lat)^2)
+    closest_index <- which.min(dists)
+    if (length(closest_index) > 0 && closest_index <= nrow(current_df)) {
+      for (var in variables) {
+        extracted_data[[var]][j, i] <- current_df[closest_index, var]
+      }
+    } else {
+      for (var in variables) {
+        extracted_data[[var]][j, i] <- NA
+      }
+    }
+  }
+}
+average_data <- lapply(extracted_data, function(data) {
+  rowMeans(data, na.rm = TRUE)
+})
+
+
+maoc_values <- numeric(nrow(site_coords))
+poc_values <- numeric(nrow(site_coords))
+
+for (i in seq_len(nrow(site_coords))) {
+  lon <- site_coords[i, 1]
+  lat <- site_coords[i, 2]
+  dists <- sqrt((maoc_poc$lon - lon)^2 + (maoc_poc$lat - lat)^2)
+  closest_index <- which.min(dists)
+}
+
+SH$MAOC <- maoc_values
+SH$POC <- poc_values
+SH$elev <- average_data$elev
+SH$nitrogen <- average_data$nitrogen
+SH$MBC <- average_data$pred
+soil_climate <- terra::extract(c(ai, et0), site_points, ExperimentID = TRUE)
+SH$ai <- soil_climate$awi_pm_sr_yr
+SH$et0 <- soil_climate$pet_pm_sr_yr
+SH$AM <- soil_bio$AM
+SH$EcM <- soil_bio$EcM
+SH$ErM  <- soil_bio$ErM 
+SH$NM <- soil_bio$NM
+```
+
+```{R}
+folder_path <- "/annual_prec_output"
+tif_files <- list.files(path = folder_path, pattern = "\\.tif$", full.names = TRUE)
+list_prec <- lapply(tif_files, terra::rast)
+str(list_prec)
+
+for (year in 1990:2021) {
+  SH_year <- SH[SH$Sampling_year == year, ]
+  site_points_year <- SH_year[, c("Longitude", "Latitude")]
+  prec_file <- paste0("/annual_prec_output/", year, "_prec.tif")
+  prec_year <- terra::rast(prec_file)
+  extracted_prec_year <- terra::extract(prec_year, site_points_year)
+  SH[SH$Sampling_year == year, "prec"] <- unlist(extracted_prec_year$sum)
+}
+SH[] <- lapply(SH, function(x) if (is.list(x)) as.character(x) else x)
+
+folder_path <- "/Tmean_yearly"
+tif_files <- list.files(path = folder_path, pattern = "\\.tif$", full.names = TRUE)
+list_temp <- lapply(tif_files, terra::rast)
+str(list_temp)
+
+SH$temp <- NA
+for (year in 1960:2019) { 
+  SH_year <- SH[SH$Sampling_year == year, ]
+  site_points_year <- SH_year[, c("Longitude", "Latitude")]
+  temp_file <- paste0("D:/git/SoilHealthDatabase/data/Tmean_yearly/","Tmean_", year,".tif")
+  temp_year <- terra::rast(temp_file)
+  extracted_temp_year <- terra::extract(temp_year, site_points_year)
+  if (grepl("-", colnames(extracted_temp_year)[2])) { 
+    column_name <- paste0("Tmean_", year, "-01") 
+  } else {
+    column_name <- paste0("Tmean_", year)
+  }
+  SH[SH$Sampling_year == year, "temp"] <- extracted_temp_year[, column_name]
+}
+```
