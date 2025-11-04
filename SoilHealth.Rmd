@@ -1,0 +1,286 @@
+---
+title: "SoilHealth"
+author: "CYX"
+date: "2025-11-3"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(cowplot)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+theme_set(theme_bw())
+library(lubridate)
+library(kableExtra)
+library(knitr)
+library("ggpubr")
+library(reshape)
+library(ggplot2)
+# install.packages("ggmap")
+library(ggmap)
+# install.packages("maps")
+library(maps)
+# install.packages("mapdata")
+library(mapdata)
+library(tidyr)
+library(broom)
+library(readr)
+library(factoextra)
+library(raster)
+library(terra) 
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+
+```
+# 读取2020年的所有月平均温度数据
+raster_list_2021<- lapply(tif_files_2021, terra::rast)
+total_prec_2021<- Reduce(`+`, raster_list_2021)  # 使用 Reduce 对栅格列表逐个加和
+yearly_mean_2021 <- total_prec_2021 / 12  # 除以12得到年均值
+output_dir <- "D:/git/SoilHealthDatabase/data/Tmean_yearly"
+# 保存年均值到文件
+writeRaster(yearly_mean_2021, file.path(output_dir, "Tmean_2021.tif"), overwrite = TRUE)
+cat("栅格文件已保存！\n")
+```{r cars}
+SH <- read_csv("D:/git/SoilHealthDatabase/SoilHealthDB_V5.csv")
+SH <- SH[!is.na(SH$Longitude) & !is.na(SH$Latitude), ]
+
+ai <- terra::rast("D:/git/Q10/Q10/Q10/data/Global-AI_ET0_annual_v3/ai_v3_yr.tif")
+et0 <- terra::rast("D:/git/Q10/Q10/Q10/data/Global-AI_ET0_annual_v3/et0_v3_yr.tif")
+AM <- terra::rast("D:/git/Q10/Q10/Q10/data/MycDistrAM_current.tif")
+EcM <- terra::rast("D:/git/Q10/Q10/Q10/data/MycDistrEM_current.tif")
+ErM <- terra::rast("D:/git/Q10/Q10/Q10/data/MycDistrER_current.tif")
+NM <- terra::rast("D:/git/Q10/Q10/Q10/data/MycDistrNM_current.tif")
+maoc_poc <- read.csv("D:/git/Q10/Q10/Q10/data/MAOC_POC/MAOC_POC.csv")
+maoc_poc <- maoc_poc[!is.na(maoc_poc$lon) & !is.na(maoc_poc$lat), ]
+
+coords <- cbind(SH$Longitude, SH$Latitude)
+site_points <- terra::vect(coords, type = "points", crs = "EPSG:4326")
+soil_climate <- terra::extract(c(ai, et0), site_points, ExperimentID = TRUE)
+site_coords <- terra::crds(site_points)
+
+soil_bio <- terra::extract(c(AM, EcM, ErM, NM), site_points, ExperimentID = TRUE)
+colnames(soil_bio) <- c("ExperimentID", "AM", "EcM", "ErM", "NM")
+
+MBC_list <- list.files(path = "D:/git/Q10/Q10/Q10/data/MBC_resample1_pred_all_vars", pattern = "resample1_all_\\d{4}\\.rds", full.names = TRUE)
+raster_MBC <- lapply(MBC_list, readRDS)
+
+
+variables <- c("elev", "nitrogen", "pred")
+extracted_data <- lapply(variables, function(var) {
+  matrix(NA, nrow = nrow(site_coords), ncol = length(raster_MBC))
+})
+names(extracted_data) <- variables
+
+for (i in seq_along(raster_MBC)) {
+  current_df <- raster_MBC[[i]]
+  
+  current_df <- current_df[!is.na(current_df$x) & !is.na(current_df$y), ]
+  
+  for (j in seq_len(nrow(site_coords))) {
+    lon <- site_coords[j, 1]
+    lat <- site_coords[j, 2]
+    dists <- sqrt((current_df$x - lon)^2 + (current_df$y - lat)^2)
+    closest_index <- which.min(dists)
+    if (length(closest_index) > 0 && closest_index <= nrow(current_df)) {
+      for (var in variables) {
+        extracted_data[[var]][j, i] <- current_df[closest_index, var]
+      }
+    } else {
+      for (var in variables) {
+        extracted_data[[var]][j, i] <- NA
+      }
+    }
+  }
+}
+average_data <- lapply(extracted_data, function(data) {
+  rowMeans(data, na.rm = TRUE)
+})
+
+
+maoc_values <- numeric(nrow(site_coords))
+poc_values <- numeric(nrow(site_coords))
+
+for (i in seq_len(nrow(site_coords))) {
+  lon <- site_coords[i, 1]
+  lat <- site_coords[i, 2]
+  
+  dists <- sqrt((maoc_poc$lon - lon)^2 + (maoc_poc$lat - lat)^2)
+  closest_index <- which.min(dists)
+  
+  if (length(closest_index) > 0 && closest_index <= nrow(maoc_poc)) {
+    maoc_values[i] <- maoc_poc$MAOC[closest_index]
+    poc_values[i] <- maoc_poc$POC[closest_index]
+  } else {
+    maoc_values[i] <- NA
+    poc_values[i] <- NA
+  }
+}
+
+SH$MAOC <- maoc_values
+SH$POC <- poc_values
+SH$elev <- average_data$elev
+SH$nitrogen <- average_data$nitrogen
+SH$MBC <- average_data$pred
+soil_climate <- terra::extract(c(ai, et0), site_points, ExperimentID = TRUE)
+SH$ai <- soil_climate$awi_pm_sr_yr
+SH$et0 <- soil_climate$pet_pm_sr_yr
+SH$AM <- soil_bio$AM
+SH$EcM <- soil_bio$EcM
+SH$ErM  <- soil_bio$ErM 
+SH$NM <- soil_bio$NM
+write.csv(SH, "SH2.csv")
+```
+
+```{R}
+folder_path <- "D:/git/SoilHealthDatabase/data/annual_prec_output"
+tif_files <- list.files(path = folder_path, pattern = "\\.tif$", full.names = TRUE)
+list_prec <- lapply(tif_files, terra::rast)
+str(list_prec)
+SH$Sampling_year[is.na(SH$Sampling_year)] <- SH$YearPublication[is.na(SH$Sampling_year)]
+
+for (year in 1990:2021) {
+  SH_year <- SH[SH$Sampling_year == year, ]
+  site_points_year <- SH_year[, c("Longitude", "Latitude")]
+  prec_file <- paste0("D:/git/SoilHealthDatabase/data/annual_prec_output/", year, "_prec.tif")
+  prec_year <- terra::rast(prec_file)
+  extracted_prec_year <- terra::extract(prec_year, site_points_year)
+  SH[SH$Sampling_year == year, "prec"] <- unlist(extracted_prec_year$sum)
+}
+SH[] <- lapply(SH, function(x) if (is.list(x)) as.character(x) else x)
+#write.csv(SH, "SH2.csv", row.names = FALSE)
+
+folder_path <- "D:/git/SoilHealthDatabase/data/Tmean_yearly"
+tif_files <- list.files(path = folder_path, pattern = "\\.tif$", full.names = TRUE)
+list_temp <- lapply(tif_files, terra::rast)
+str(list_temp)
+
+SH$temp <- NA
+for (year in 1960:2019) {  
+  SH_year <- SH[SH$Sampling_year == year, ]
+  site_points_year <- SH_year[, c("Longitude", "Latitude")]
+  temp_file <- paste0("D:/git/SoilHealthDatabase/data/Tmean_yearly/","Tmean_", year,".tif")
+  temp_year <- terra::rast(temp_file)
+  extracted_temp_year <- terra::extract(temp_year, site_points_year)
+  if (grepl("-", colnames(extracted_temp_year)[2])) {  
+    column_name <- paste0("Tmean_", year, "-01")  
+  } else {
+    column_name <- paste0("Tmean_", year)
+  }
+  SH[SH$Sampling_year == year, "temp"] <- extracted_temp_year[, column_name]
+}
+SH$temp <- as.numeric(SH$temp)
+write.csv(SH, "SH3.csv", row.names = FALSE)
+```
+
+
+```{r pressure, echo=FALSE}
+SH <- read.csv("D:/git/SoilHealthDatabase/SH3.csv", fileEncoding = "GBK")
+clay_5 <- terra::rast("D:/git/Q10/Q10/Q10/data/soilGRIDS/CLYPPT_M_sl2_250m_ll.tif")
+site_points <- vect(SH, geom = c("Longitude", "Latitude"), crs = crs(clay_5))
+
+silt_5 <- terra::rast("D:/git/Q10/Q10/Q10/data/soilGRIDS/SLTPPT_M_sl2_250m_ll.tif")
+cec_5 <- terra::rast("D:/git/Q10/Q10/Q10/data/soilGRIDS/CECSOL_M_sl2_250m_ll.tif")
+ph_kcl_5 <- terra::rast("D:/git/Q10/Q10/Q10/data/soilGRIDS/PHIKCL_M_sl2_250m_ll.tif")
+bd_5 <- terra::rast("D:/git/Q10/Q10/Q10/data/soilGRIDS/BLDFIE_M_sl2_250m_ll.tif")
+soc_5 <- terra::rast("D:/git/Q10/Q10/Q10/data/soilGRIDS/ORCDRC_M_sl2_250m_ll.tif")
+crf_5 <- terra::rast("H:/SoilGrid/CRFVOL_M_sl2_250m_ll.tif")
+ocsthaO_5 <- terra::rast("H:/SoilGrid/OCSTHA_M_sd2_250m_ll.tif")
+phihox_5 <- terra::rast("H:/SoilGrid/PHIHOX_M_sl2_250m_ll.tif")
+taxusda <- terra::rast("H:/SoilGrid/TAXOUSDA_250m_ll.tif")
+taxnwrb <- terra::rast("H:/SoilGrid/TAXNWRB_250m_ll.tif")
+soil_proper_5 <- terra::extract(c(clay_5, silt_5, cec_5, ph_kcl_5, bd_5, soc_5,crf_5,ocsthaO_5,phihox_5,taxusda,taxnwrb), site_points, ID = TRUE)
+colnames(soil_proper_5) <- c("ID","CLY_5", "SLT_5", "CEC_5", "PHIKCL_5", "BD_5", "ORC_5","crf_5","ocsthaO_5","phihox_5","taxusda","taxnwrb")
+
+clay_0 <- terra::rast("H:/SoilGrid/CLYPPT_M_sl1_250m_ll.tif")
+silt_0 <- terra::rast("H:/SoilGrid/SLTPPT_M_sl1_250m_ll.tif")
+cec_0 <- terra::rast("H:/SoilGrid/CECSOL_M_sl1_250m_ll.tif")
+ph_kcl_0 <- terra::rast("H:/SoilGrid/PHIKCL_M_sl1_250m_ll.tif")
+bd_0 <- terra::rast("H:/SoilGrid/BLDFIE_M_sl1_250m_ll.tif")
+soc_0 <- terra::rast("H:/SoilGrid/ORCDRC_M_sl1_250m_ll.tif")
+crf_0 <- terra::rast("H:/SoilGrid/CRFVOL_M_sl1_250m_ll.tif")
+ocsthaO_0 <- terra::rast("H:/SoilGrid/OCSTHA_M_sd1_250m_ll.tif")
+phihox_0 <- terra::rast("H:/SoilGrid/PHIHOX_M_sl1_250m_ll.tif")
+
+soil_proper_0  <- terra::extract(c(clay_0, silt_0, cec_0, ph_kcl_0, bd_0, soc_0,crf_0,ocsthaO_0,phihox_0), site_points, ID = TRUE)
+colnames(soil_proper_0 ) <- c("ID","CLY_0", "SLT_0", "CEC_0", "PHIKCL_0", "BD_0", "ORC_0","crf_0","ocsthaO_0","phihox_0")
+
+clay_15 <- terra::rast("H:/SoilGrid/CLYPPT_M_sl3_250m_ll.tif")
+silt_15 <- terra::rast("H:/SoilGrid/SLTPPT_M_sl3_250m_ll.tif")
+cec_15 <- terra::rast("H:/SoilGrid/CECSOL_M_sl3_250m_ll.tif")
+ph_kcl_15 <- terra::rast("H:/SoilGrid/PHIKCL_M_sl3_250m_ll.tif")
+bd_15 <- terra::rast("H:/SoilGrid/BLDFIE_M_sl3_250m_ll.tif")
+soc_15 <- terra::rast("H:/SoilGrid/ORCDRC_M_sl3_250m_ll.tif")
+crf_15 <- terra::rast("H:/SoilGrid/CRFVOL_M_sl3_250m_ll.tif")
+ocsthaO_15 <- terra::rast("H:/SoilGrid/OCSTHA_M_sd3_250m_ll.tif")
+phihox_15 <- terra::rast("H:/SoilGrid/PHIHOX_M_sl3_250m_ll.tif")
+
+soil_proper_15  <- terra::extract(c(clay_15, silt_15, cec_15, ph_kcl_15, bd_15, soc_15,crf_15,ocsthaO_15,phihox_15), site_points, ID = TRUE)
+colnames(soil_proper_15 ) <- c("ID","CLY_15", "SLT_15", "CEC_15", "PHIKCL_15", "BD_15", "ORC_15","crf_15","ocsthaO_15","phihox_15")
+
+clay_30 <- terra::rast("H:/SoilGrid/CLYPPT_M_sl4_250m_ll.tif")
+silt_30 <- terra::rast("H:/SoilGrid/SLTPPT_M_sl4_250m_ll.tif")
+cec_30 <- terra::rast("H:/SoilGrid/CECSOL_M_sl4_250m_ll.tif")
+ph_kcl_30 <- terra::rast("H:/SoilGrid/PHIKCL_M_sl4_250m_ll.tif")
+bd_30 <- terra::rast("H:/SoilGrid/BLDFIE_M_sl4_250m_ll.tif")
+soc_30 <- terra::rast("H:/SoilGrid/ORCDRC_M_sl4_250m_ll.tif")
+crf_30 <- terra::rast("H:/SoilGrid/CRFVOL_M_sl4_250m_ll.tif")
+ocsthaO_30 <- terra::rast("H:/SoilGrid/OCSTHA_M_sd4_250m_ll.tif")
+phihox_30 <- terra::rast("H:/SoilGrid/PHIHOX_M_sl4_250m_ll.tif")
+
+soil_proper_30  <- terra::extract(c(clay_30, silt_30, cec_30, ph_kcl_30, bd_30, soc_30,crf_30,ocsthaO_30,phihox_30), site_points, ID = TRUE)
+colnames(soil_proper_30 ) <- c("ID","CLY_30", "SLT_30", "CEC_30", "PHIKCL_30", "BD_30", "ORC_30","crf_30","ocsthaO_30","phihox_30")
+
+clay_60 <- terra::rast("H:/SoilGrid/CLYPPT_M_sl5_250m_ll.tif")
+silt_60 <- terra::rast("H:/SoilGrid/SLTPPT_M_sl5_250m_ll.tif")
+cec_60 <- terra::rast("H:/SoilGrid/CECSOL_M_sl5_250m_ll.tif")
+ph_kcl_60 <- terra::rast("H:/SoilGrid/PHIKCL_M_sl5_250m_ll.tif")
+bd_60 <- terra::rast("H:/SoilGrid/BLDFIE_M_sl5_250m_ll.tif")
+soc_60 <- terra::rast("H:/SoilGrid/ORCDRC_M_sl5_250m_ll.tif")
+crf_60 <- terra::rast("H:/SoilGrid/CRFVOL_M_sl5_250m_ll.tif")
+ocsthaO_60 <- terra::rast("H:/SoilGrid/OCSTHA_M_sd5_250m_ll.tif")
+phihox_60 <- terra::rast("H:/SoilGrid/PHIHOX_M_sl5_250m_ll.tif")
+
+soil_proper_60  <- terra::extract(c(clay_60, silt_60, cec_60, ph_kcl_60, bd_60, soc_60,crf_60,ocsthaO_60,phihox_60), site_points, ID = TRUE)
+colnames(soil_proper_60 ) <- c("ID","CLY_60", "SLT_60", "CEC_60", "PHIKCL_60", "BD_60", "ORC_60","crf_60","ocsthaO_60","phihox_60")
+
+
+clay_100 <- terra::rast("H:/SoilGrid/CLYPPT_M_sl6_250m_ll.tif")
+silt_100 <- terra::rast("H:/SoilGrid/SLTPPT_M_sl6_250m_ll.tif")
+cec_100 <- terra::rast("H:/SoilGrid/CECSOL_M_sl6_250m_ll.tif")
+ph_kcl_100 <- terra::rast("H:/SoilGrid/PHIKCL_M_sl6_250m_ll.tif")
+bd_100 <- terra::rast("H:/SoilGrid/BLDFIE_M_sl6_250m_ll.tif")
+soc_100 <- terra::rast("H:/SoilGrid/ORCDRC_M_sl6_250m_ll.tif")
+crf_100 <- terra::rast("H:/SoilGrid/CRFVOL_M_sl6_250m_ll.tif")
+ocsthaO_100 <- terra::rast("H:/SoilGrid/OCSTHA_M_sd6_250m_ll.tif")
+phihox_100 <- terra::rast("H:/SoilGrid/PHIHOX_M_sl6_250m_ll.tif")
+
+soil_proper_100  <- terra::extract(c(clay_100, silt_100, cec_100, ph_kcl_100, bd_100, soc_100,crf_100,ocsthaO_100,phihox_100), site_points, ID = TRUE)
+colnames(soil_proper_100 ) <- c("ID","CLY_100", "SLT_100", "CEC_100", "PHIKCL_100", "BD_100", "ORC_100","crf_100","ocsthaO_100","phihox_100")
+
+clay_200 <- terra::rast("H:/SoilGrid/CLYPPT_M_sl7_250m_ll.tif")
+silt_200 <- terra::rast("H:/SoilGrid/SLTPPT_M_sl7_250m_ll.tif")
+cec_200 <- terra::rast("H:/SoilGrid/CECSOL_M_sl7_250m_ll.tif")
+ph_kcl_200 <- terra::rast("H:/SoilGrid/PHIKCL_M_sl7_250m_ll.tif")
+bd_200 <- terra::rast("H:/SoilGrid/BLDFIE_M_sl7_250m_ll.tif")
+soc_200 <- terra::rast("H:/SoilGrid/ORCDRC_M_sl7_250m_ll.tif")
+crf_200 <- terra::rast("H:/SoilGrid/CRFVOL_M_sl7_250m_ll.tif")
+phihox_200 <- terra::rast("H:/SoilGrid/PHIHOX_M_sl7_250m_ll.tif")
+
+soil_proper_200  <- terra::extract(c(clay_200, silt_200, cec_200, ph_kcl_200, bd_200, soc_200,crf_200,phihox_200), site_points, ID = TRUE)
+colnames(soil_proper_200 ) <- c("ID","CLY_200", "SLT_200", "CEC_200", "PHIKCL_200", "BD_200", "ORC_200","crf_200","phihox_200")
+
+soil_proper_0_noID   <- soil_proper_0[, -1]
+soil_proper_15_noID  <- soil_proper_15[, -1]
+soil_proper_30_noID  <- soil_proper_30[, -1]
+soil_proper_60_noID  <- soil_proper_60[, -1]
+soil_proper_100_noID <- soil_proper_100[, -1]
+soil_proper_200_noID <- soil_proper_200[, -1]
+
+SH <- cbind(SH, soil_proper_0_noID, soil_proper_15_noID, soil_proper_30_noID,
+            soil_proper_60_noID, soil_proper_100_noID, soil_proper_200_noID)
+write.csv(SH, "SH_output2.csv", row.names = FALSE)
+```
+
